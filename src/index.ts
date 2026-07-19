@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+import { readFileSync } from 'fs';
+import { dirname, join } from 'path';
+import { fileURLToPath } from 'url';
 import { SearchEngine } from './search-engine.js';
 import { EnhancedContentExtractor } from './enhanced-content-extractor.js';
 import { WebSearchToolInput, WebSearchToolOutput, SearchResult } from './types.js';
@@ -7,7 +10,11 @@ import { createLogger } from './logger.js';
 
 const log = createLogger('CLI');
 
-const VERSION = '0.1.0';
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+const packageJson = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf-8'));
+const VERSION = packageJson.version;
 const PROGRAM = 'cited';
 
 class UserError extends Error {}
@@ -48,7 +55,6 @@ EXAMPLES
 
 ENVIRONMENT
   LOG_LEVEL                  debug | info | warn | error (default: info)
-  BROWSER_HEADLESS           set to false to show the browser window (default: true)
   MAX_CONTENT_LENGTH         default per-result content cap (default: 500000)
   FORCE_MULTI_ENGINE_SEARCH  'true' to try every engine even if one is good
   ENABLE_RELEVANCE_CHECKING  'false' to skip result-quality scoring

@@ -17,15 +17,15 @@ Pick whichever fits:
 
 ```bash
 # 1. Run it on the fly without installing
-npx @1mpactin9/cited-cli "effects of sleep on memory"
+npx @1mpactin9/cited "effects of sleep on memory"
 
 # 2. Install globally, then use the `cited` command
-npm install -g @1mpactin9/cited-cli
+npm install -g @1mpactin9/cited
 cited "effects of sleep on memory"
 
-# 3. Clone and run the build directly
-git clone https://github.com/1mpactin9/cited-cli.git
-cd cited-cli
+# 3. Clone and build manually
+git clone https://github.com/1mpactin9/cited.git
+cd cited
 npm install
 npm run build
 node dist/index.js "effects of sleep on memory"
@@ -93,7 +93,6 @@ cited "model context protocol" --no-content > results.txt
 | Variable | Description |
 |---|---|
 | `LOG_LEVEL` | `debug` \| `info` \| `warn` \| `error` (default: `info`) |
-| `BROWSER_HEADLESS` | `false` to show the browser window (default: `true`) |
 | `MAX_CONTENT_LENGTH` | Default per-result content cap (default: `500000`) |
 | `FORCE_MULTI_ENGINE_SEARCH` | `true` to try every engine even if one already returns good results |
 | `ENABLE_RELEVANCE_CHECKING` | `false` to skip result-quality scoring |

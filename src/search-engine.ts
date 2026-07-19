@@ -89,7 +89,7 @@ export class SearchEngine {
       try {
         const { firefox } = await import('playwright');
         browser = await firefox.launch({
-          headless: process.env.BROWSER_HEADLESS !== 'false',
+          headless: true,
           args: ['--no-sandbox', '--disable-dev-shm-usage'],
         });
         log.debug(`brave attempt ${attempt}/2`);
@@ -140,8 +140,9 @@ export class SearchEngine {
       try {
         const { chromium } = await import('playwright');
         browser = await chromium.launch({
-          headless: process.env.BROWSER_HEADLESS !== 'false',
+          headless: true,
           args: [
+            '--headless=new',
             '--no-sandbox',
             '--disable-blink-features=AutomationControlled',
             '--disable-dev-shm-usage',

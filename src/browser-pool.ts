@@ -8,14 +8,12 @@ export class BrowserPool {
   private maxBrowsers: number;
   private browserTypes: string[];
   private currentBrowserIndex = 0;
-  private headless: boolean;
   private lastUsedBrowserType: string = '';
 
   constructor() {
     this.maxBrowsers = parseInt(process.env.MAX_BROWSERS || '3', 10);
-    this.headless = process.env.BROWSER_HEADLESS !== 'false';
     this.browserTypes = (process.env.BROWSER_TYPES || 'chromium,firefox').split(',').map(t => t.trim());
-    log.debug(`configuration: maxBrowsers=${this.maxBrowsers}, headless=${this.headless}, types=${this.browserTypes.join(',')}`);
+    log.debug(`configuration: maxBrowsers=${this.maxBrowsers}, types=${this.browserTypes.join(',')}`);
   }
 
   async getBrowser(): Promise<Browser> {
@@ -36,14 +34,15 @@ export class BrowserPool {
       } catch (error) {
         log.debug(`browser ${browserType} health check failed`, error);
         this.browsers.delete(browserType);
-        try { await browser.close(); } catch { /* already gone */ }
+        try { await browser.close(); } catch { }
       }
     }
 
     log.debug(`launching new ${browserType} browser`);
     const launchOptions = {
-      headless: this.headless,
+      headless: true,
       args: [
+        '--headless=new',
         '--no-sandbox',
         '--disable-blink-features=AutomationControlled',
         '--disable-dev-shm-usage',

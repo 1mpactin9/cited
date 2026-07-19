@@ -147,7 +147,7 @@ export class EnhancedContentExtractor {
       return content;
     } catch (error) {
       log.error(`browser extraction failed: ${url}`, error);
-      try { await context.close(); } catch { /* context may already be closed */ }
+      try { await context.close(); } catch { }
       throw error;
     }
   }
