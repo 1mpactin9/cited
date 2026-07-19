@@ -1,94 +1,110 @@
-# Student Research & Study Agent
+<div align="center">
+    <h1>cited.</h1>
+    <p>
+        <a href="#install">Install</a> •
+        <a href="#usage">Usage</a> •
+        <a href="#features">Features</a>
+    </p>
+</div>
 
-An AI agent built for students — a guide for the full academic workflow, from
-first idea to final review. It doesn't write your work for you. It helps you
-think it through, check it, and understand it, with everything grounded in
-real, traceable sources.
+A command-line tool for searching the web and pulling clean, readable content out of the pages it finds - built so that everything it returns is traceable to a real source you can check, cite, and verify yourself.
 
-Available as a **plugin** for existing AI chat platforms today, evolving into
-a standalone **SDK** and eventually a fully native application.
+`cited` runs multi-engine web search (Bing, Brave, DuckDuckGo) with automatic fallback, then follows the top results to extract their main content. Results and page content go to stdout; logs go to stderr, so you can pipe output into a file or another tool without noise.
 
----
+## Install
 
-## What It Does
+Pick whichever fits:
 
-The agent is organized around **skills** — focused, reliable capabilities
-that each handle one part of the academic process. Skills can be chained
-together (research → outline → draft → review) or used on their own.
+```bash
+# 1. Run it on the fly without installing
+npx @1mpactin9/cited-cli "effects of sleep on memory"
 
-## Skills
+# 2. Install globally, then use the `cited` command
+npm install -g @1mpactin9/cited-cli
+cited "effects of sleep on memory"
 
-### Ideation & Direction
-| Skill | What it does |
+# 3. Clone and run the build directly
+git clone https://github.com/1mpactin9/cited-cli.git
+cd cited-cli
+npm install
+npm run build
+node dist/index.js "effects of sleep on memory"
+```
+
+> Browser-based search and extraction (Bing, Brave, and the browser fallback for content) use Playwright. After install, enable them with `npx playwright install`. Without it, `cited` still works - it falls back to DuckDuckGo search and axios-based content extraction.
+
+## Usage
+
+```
+cited <query>            Search the web and fetch full content from top results.
+cited page <url>         Extract full content from a single page URL.
+cited help               Show help.
+```
+
+### Search options
+
+| Option | Description |
 |---|---|
-| `scope` | Narrows a broad topic or assignment into a workable, well-bounded focus. |
-| `brainstorm` | Generates and expands ideas, angles, or approaches to a problem or prompt. |
-| `build` | Takes an idea or outline and develops it into a fuller piece of work. |
+| `--limit <n>` | Number of results to return (1-10, default 5) |
+| `--no-content` | Return only search snippets; skip fetching page content |
+| `--max-content <chars>` | Max characters of content per result (0 = no limit) |
 
-### Research & Verification
-| Skill | What it does |
+### Page options
+
+| Option | Description |
 |---|---|
-| `research` | Finds credible sources and turns them into usable, cited material. |
-| `deep-research` | Extended, multi-source research for larger projects — broader coverage, deeper verification. |
-| `verify` | Checks a specific claim or statement against real sources. |
-| `trace` | Follows a claim back to its original source and shows the full chain. |
+| `--max-content <chars>` | Max characters of extracted content (0 = no limit) |
 
-### Structure & Planning
-| Skill | What it does |
+### Global options
+
+| Option | Description |
 |---|---|
-| `outline` | Turns a topic into a structured outline — thesis, sections, sub-points. |
-| `plan` | Breaks a larger project into steps, milestones, and a realistic timeline. |
-| `organize` | Restructures existing notes, sources, or drafts into a coherent order. |
+| `-h, --help` | Show help |
+| `-v, --version` | Show version |
 
-### Argument & Position
-| Skill | What it does |
+### Examples
+
+```bash
+# Full search - top results with extracted content
+cited "effects of sleep on memory"
+
+# Lightweight - snippets only, no page fetching
+cited effects of sleep on memory --limit 3 --no-content
+
+# Pull content from a specific page
+cited page https://example.com/article --max-content 2000
+
+# Pipe results somewhere useful
+cited "model context protocol" --no-content > results.txt
+```
+
+## Features
+
+| Feature | What it does |
 |---|---|
-| `state` | Clearly articulates a position, thesis, or claim before it's argued. |
-| `attack` | Stress-tests an argument by raising the strongest objections to it. |
-| `counter` | Builds a rebuttal to a specific objection or opposing argument. |
-| `concede` | Identifies where a position is genuinely weak and should be qualified or revised. |
+| Multi-engine search | Tries Bing, Brave, and DuckDuckGo in order, scoring results for relevance and falling back automatically when an engine is blocked or returns low-quality results. |
+| Full-content search | Searches, then follows the top non-PDF links and extracts the main text of each page so you can read and cite the actual source. |
+| Summaries search | Lightweight mode (`--no-content`) that returns titles, URLs, and snippets without following links. |
+| Single-page extraction | `cited page <url>` pulls clean, readable content out of one page - handy for citing or reading a known source. |
+| Source-grounded output | Every result carries its URL and timestamp; nothing is presented without a source you can open and verify. |
 
-### Review & Feedback
-| Skill | What it does |
+## Environment
+
+| Variable | Description |
 |---|---|
-| `review` | Critiques a draft's structure, argument, clarity, and tone. |
-| `clarify` | Rewrites or explains unclear passages so they read the way they were meant to. |
-| `flag` | Marks unsupported claims, weak reasoning, or risky assumptions for the student to address. |
-
-### Understanding & Synthesis
-| Skill | What it does |
-|---|---|
-| `summarize` | Condenses a source or set of notes while preserving attribution. |
-| `synthesize` | Combines multiple sources or ideas into a single, coherent thread. |
-| `define` | Explains a term or concept clearly, at whatever depth is needed. |
-| `learn` | Breaks down a concept for understanding, adjustable from simple to advanced. |
-
-### Practice & Retention
-| Skill | What it does |
-|---|---|
-| `practice` | Generates practice questions, problems, or recall exercises from the student's material. |
-
----
-
-## Core Principle: No AI Slop
-
-Every research-backed skill runs through the same standard: nothing is
-presented as fact without a source, nothing is kept if it can't be verified,
-and nothing is handed to the student as "finished" — only as a strong,
-honest starting point. See [`ETHICS.md`](./docs/ETHICS.md) and
-[`RESPONSIBLE_USE.md`](./docs/RESPONSIBLE_USE.md) for the principles behind this.
+| `LOG_LEVEL` | `debug` \| `info` \| `warn` \| `error` (default: `info`) |
+| `BROWSER_HEADLESS` | `false` to show the browser window (default: `true`) |
+| `MAX_CONTENT_LENGTH` | Default per-result content cap (default: `500000`) |
+| `FORCE_MULTI_ENGINE_SEARCH` | `true` to try every engine even if one already returns good results |
+| `ENABLE_RELEVANCE_CHECKING` | `false` to skip result-quality scoring |
 
 ## Documentation
 
-- [`ETHICS.md`](./docs/ETHICS.md) — the ethical commitments behind the product
+- [`ETHICS.md`](./docs/ETHICS.md) - the ethical commitments behind the product
 - [`PRODUCT.md`](./docs/PRODUCT.md) - about the product
-- [`RESPONSIBLE_USE.md`](./docs/RESPONSIBLE_USE.md) — what the product is and isn't meant for, and guidance for using it well
-- [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md) — expected behavior for anyone contributing to or building on this project
-- [`CONTRIBUTING.md`](./CONTRIBUTING.md) — how to contribute
-- [`SECURITY.md`](./SECURITY.md) — how to report security issues
-- [`LICENSE.md`](./LICENSE.md) — usage terms
+- [`RESPONSIBLE_USE.md`](./docs/RESPONSIBLE_USE.md) - what the product is and isn't meant for, and guidance for using it well
+- [`LICENSE.md`](./LICENSE.md) - usage terms
 
 ## Status
 
-Early stage. Currently shipping as a plugin; SDK and native app are planned
-future stages. Expect this documentation to evolve alongside the product.
+Early stage. `cited` currently ships the search and source-extraction engine; broader academic-workflow features are on the roadmap.
