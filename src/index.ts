@@ -26,6 +26,8 @@ interface CliArgs {
   limit: number;
   includeContent: boolean;
   maxContentLength?: number;
+  engine?: string;
+  timeout?: number;
   json: boolean;
 }
 
@@ -36,11 +38,14 @@ USAGE
   ${PROGRAM} <query>            Search the web and fetch full content from top results.
   ${PROGRAM} page <url>         Extract full content from a single page URL.
   ${PROGRAM} help               Show this help.
+  ${PROGRAM} version            Show version.
 
 SEARCH OPTIONS
   --limit <n>            Number of results to return (1-10, default 5)
   --no-content           Return only search snippets; skip fetching page content
   --max-content <chars>  Max characters of content per result (0 = no limit)
+  --engine <name>        Force a specific engine: bing | brave | duckduckgo
+  --timeout <ms>         Per-fetch wall-clock timeout in milliseconds (default 8000)
   --json                 Emit structured JSON on stdout (agent-friendly)
 
 PAGE OPTIONS
@@ -76,18 +81,21 @@ function parseArgs(argv: string[]): CliArgs {
     limit: 5,
     includeContent: true,
     maxContentLength: undefined,
+    engine: undefined,
+    timeout: undefined,
     json: false,
   };
 
   const positional: string[] = [];
-  const knownFlags = ['-h', '--help', '-v', '--version', '--no-content', '--limit', '--max-content', '--json'];
+  const knownFlags = ['-h', '--help', '-v', '--version', '--no-content', '--limit', '--max-content', '--engine', '--timeout', '--json'];
+  const flagsWithValues = new Set(['--limit', '--max-content', '--engine', '--timeout']);
   // Pre-validate: reject unrecognized flags before any parsing
   for (let i = 0; i < argv.length; i++) {
     const tok = argv[i];
     if ((tok.startsWith('--') || (tok.startsWith('-') && tok.length > 2 && !/^\d+$/.test(tok))) && !knownFlags.includes(tok)) {
-      // Check if it's a flag value (preceded by --limit or --max-content)
+      // Check if it's a flag value (preceded by a value-taking flag)
       const prev = argv[i - 1];
-      if (prev === '--limit' || prev === '--max-content') continue;
+      if (prev && flagsWithValues.has(prev)) continue;
       throw new UserError(`Unrecognized option: ${tok}. Use --help for usage information.`);
     }
   }
@@ -127,6 +135,24 @@ function parseArgs(argv: string[]): CliArgs {
         args.maxContentLength = num;
         break;
       }
+      case '--engine': {
+        const val = argv[++i];
+        const allowed = ['bing', 'brave', 'duckduckgo'];
+        if (!val || !allowed.includes(val.toLowerCase())) {
+          throw new UserError(`--engine must be one of: ${allowed.join(', ')} (got "${val ?? ''}")`);
+        }
+        args.engine = val.toLowerCase();
+        break;
+      }
+      case '--timeout': {
+        const val = argv[++i];
+        const num = parseInt(val, 10);
+        if (isNaN(num) || num < 500) {
+          throw new UserError(`--timeout must be a number ≥ 500 milliseconds (got "${val ?? ''}")`);
+        }
+        args.timeout = num;
+        break;
+      }
       default:
         positional.push(tok);
     }
@@ -159,22 +185,10 @@ function parseArgs(argv: string[]): CliArgs {
     return args;
   }
 
-  // Reject 'version' as a bare positional — it's only valid as --version / -v
+  // Accept `cited version` as a bare positional (matches every CLI convention)
   if (positional[0] === 'version') {
-    printHelp();
-    process.stderr.write('\nError: "version" is not a search query. Use -v or --version to show version.\n\n');
-    process.exit(1);
-  }
-
-  // Check for unrecognized flags
-  for (const tok of argv.slice(2)) {
-    if (tok.startsWith('--') || (tok.startsWith('-') && tok.length > 2 && !/^\d+$/.test(tok))) {
-      // Skip known flags and their values
-      const knownFlags = ['-h', '--help', '-v', '--version', '--no-content', '--limit', '--max-content', '--json'];
-      if (!knownFlags.includes(tok)) {
-        throw new UserError(`Unrecognized option: ${tok}. Use --help for usage information.`);
-      }
-    }
+    args.command = 'version';
+    return args;
   }
 
   args.command = 'search';
@@ -193,7 +207,7 @@ function isPlaceholderDescription(d: string): boolean {
 }
 
 function formatFullResults(result: WebSearchToolOutput, maxContentLength?: number): string {
-  let text = `Search: "${result.query}" — ${result.total_results} result(s)\n\n`;
+  let text = `Search: "${result.query}" — ${result.total_results} result(s) in ${result.search_time_ms}ms\n\n`;
 
   result.results.forEach((r, idx) => {
     text += `[${idx + 1}] ${r.title} — ${r.url}\n`;
@@ -212,8 +226,9 @@ function formatFullResults(result: WebSearchToolOutput, maxContentLength?: numbe
   return text;
 }
 
-function formatSummaries(query: string, results: Array<{ title: string; url: string; description: string }>): string {
-  let text = `Search: "${query}" — ${results.length} result(s)\n\n`;
+function formatSummaries(query: string, results: Array<{ title: string; url: string; description: string }>, searchTimeMs?: number): string {
+  const timing = typeof searchTimeMs === 'number' ? ` in ${searchTimeMs}ms` : '';
+  let text = `Search: "${query}" — ${results.length} result(s)${timing}\n\n`;
   results.forEach((r, i) => {
     text += `[${i + 1}] ${r.title} — ${r.url}\n`;
     if (!isPlaceholderDescription(r.description)) {
@@ -316,12 +331,12 @@ async function handleWebSearch(
   contentExtractor: EnhancedContentExtractor
 ): Promise<WebSearchToolOutput> {
   const startTime = Date.now();
-  const { query, limit = 5, includeContent = true } = input;
+  const { query, limit = 5, includeContent = true, engine, timeout } = input;
 
   const searchLimit = includeContent ? Math.min(limit * 2 + 2, 10) : limit;
   log.debug(`requesting ${searchLimit} results to get ${limit} non-PDF content results`);
 
-  const searchResponse = await searchEngine.search({ query, numResults: searchLimit });
+  const searchResponse = await searchEngine.search({ query, numResults: searchLimit, engine, timeout });
   const searchResults = searchResponse.results;
 
   const pdfCount = searchResults.filter(r => isPdfUrl(r.url)).length;
@@ -329,7 +344,7 @@ async function handleWebSearch(
   log.debug(`engine: ${searchResponse.engine}; ${limit} requested/${searchResults.length} obtained; PDF: ${pdfCount}; ${followedCount} followed`);
 
   const enhancedResults = includeContent
-    ? await contentExtractor.extractContentForResults(searchResults, limit)
+    ? await contentExtractor.extractContentForResults(searchResults, limit, timeout)
     : searchResults.slice(0, limit);
 
   let combinedStatus = `Search engine: ${searchResponse.engine}; ${limit} requested/${searchResults.length} obtained; PDF: ${pdfCount}; ${followedCount} followed`;
@@ -361,7 +376,7 @@ async function runSearch(
 ): Promise<void> {
   if (args.includeContent) {
     const result = await handleWebSearch(
-      { query: args.query, limit: args.limit, includeContent: true, maxContentLength: args.maxContentLength },
+      { query: args.query, limit: args.limit, includeContent: true, maxContentLength: args.maxContentLength, engine: args.engine, timeout: args.timeout },
       searchEngine,
       contentExtractor
     );
@@ -372,18 +387,20 @@ async function runSearch(
       process.stdout.write(formatFullResults(result, args.maxContentLength));
     }
   } else {
+    const summaryStart = Date.now();
     log.info('summaries', { query: args.query, limit: args.limit });
-    const searchResponse = await searchEngine.search({ query: args.query, numResults: args.limit });
+    const searchResponse = await searchEngine.search({ query: args.query, numResults: args.limit, engine: args.engine, timeout: args.timeout });
     const summaryResults = searchResponse.results.map(item => ({
       title: item.title,
       url: item.url,
       description: item.description,
     }));
+    const summaryElapsed = Date.now() - summaryStart;
     log.info(`summaries completed, ${summaryResults.length} results`);
     if (args.json) {
       process.stdout.write(formatSummariesJson(args.query, summaryResults));
     } else {
-      process.stdout.write(formatSummaries(args.query, summaryResults));
+      process.stdout.write(formatSummaries(args.query, summaryResults, summaryElapsed));
     }
   }
 }
@@ -393,6 +410,7 @@ async function runPage(args: CliArgs, contentExtractor: EnhancedContentExtractor
   const content = await contentExtractor.extractContent({
     url: args.url,
     maxContentLength: args.maxContentLength,
+    timeout: args.timeout,
   });
   log.info(`single page extracted ${content.length} characters`);
   if (args.json) {

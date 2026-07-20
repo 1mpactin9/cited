@@ -25,14 +25,16 @@ export class EnhancedContentExtractor {
   }
 
   async extractContent(options: ContentExtractionOptions): Promise<string> {
-    const { url } = options;
+    const { url, signal } = options;
     log.debug(`extracting: ${url}`);
+    if (signal?.aborted) throw new Error('Extraction aborted');
     try {
       const content = await this.extractWithAxios(options);
       log.debug(`axios extracted ${content.length} chars: ${url}`);
       return content;
     } catch (error) {
       log.failure(`axios extraction failed for ${url}`, error instanceof Error ? error.message : 'unknown');
+      if (signal?.aborted) throw new Error('Extraction aborted');
       if (this.shouldUseBrowser(error, url)) {
         log.info(`falling back to headless browser: ${url}`);
         try {
@@ -43,7 +45,11 @@ export class EnhancedContentExtractor {
           }
           return content;
         } catch (browserError) {
-          log.error(`browser extraction also failed: ${url}`, browserError);
+          if (signal?.aborted) {
+            log.debug(`browser extraction aborted (timeout): ${url}`);
+          } else {
+            log.error(`browser extraction also failed: ${url}`, browserError);
+          }
           const msg = browserError instanceof Error ? browserError.message : String(browserError);
           throw new Error(`Both axios and browser extraction failed for ${url}: ${msg}`);
         }
@@ -73,7 +79,7 @@ export class EnhancedContentExtractor {
   }
 
   private async extractWithBrowser(options: ContentExtractionOptions): Promise<string> {
-    const { url, timeout = this.defaultTimeout } = options;
+    const { url, timeout = this.defaultTimeout, signal } = options;
     const browser = await this.browserPool.getBrowser();
     const browserType = this.browserPool.getLastUsedBrowserType();
 
@@ -93,6 +99,19 @@ export class EnhancedContentExtractor {
       : { ...baseContextOptions, isMobile: Math.random() > 0.8 };
 
     const context = await browser.newContext(contextOptions);
+    let abortListener: (() => void) | null = null;
+    if (signal) {
+      abortListener = () => {
+        log.debug(`abort signal fired, closing context: ${url}`);
+        context.close().catch(() => { });
+      };
+      signal.addEventListener('abort', abortListener, { once: true });
+      if (signal.aborted) {
+        signal.removeEventListener('abort', abortListener);
+        await context.close().catch(() => { });
+        throw new Error('Extraction aborted');
+      }
+    }
 
     await context.addInitScript(() => {
       const g = globalThis as any;
@@ -158,10 +177,16 @@ export class EnhancedContentExtractor {
 
       const content = this.parseContent(html);
       await context.close();
+      if (signal && abortListener) signal.removeEventListener('abort', abortListener);
       return content;
     } catch (error) {
-      log.error(`browser extraction failed: ${url}`, error);
+      if (signal?.aborted) {
+        log.debug(`browser extraction aborted (timeout): ${url}`);
+      } else {
+        log.error(`browser extraction failed: ${url}`, error);
+      }
       try { await context.close(); } catch { }
+      if (signal && abortListener) signal.removeEventListener('abort', abortListener);
       throw error;
     }
   }
@@ -330,18 +355,30 @@ export class EnhancedContentExtractor {
     return timezones[Math.floor(Math.random() * timezones.length)];
   }
 
-  async extractContentForResults(results: SearchResult[], targetCount: number = results.length): Promise<SearchResult[]> {
+  async extractContentForResults(results: SearchResult[], targetCount: number = results.length, timeoutMs?: number): Promise<SearchResult[]> {
+    const perExtractionTimeout = typeof timeoutMs === 'number' && timeoutMs > 0 ? timeoutMs : 6000;
+    const wallClockTimeout = Math.max(perExtractionTimeout + 2000, Math.floor(perExtractionTimeout * 1.35));
     const nonPdfResults = results.filter(result => !isPdfUrl(result.url));
     const resultsToProcess = nonPdfResults.slice(0, Math.min(targetCount * 2, 10));
-    log.debug(`processing ${resultsToProcess.length} non-PDF results for ${targetCount} target`);
+    log.debug(`processing ${resultsToProcess.length} non-PDF results for ${targetCount} target (timeout=${perExtractionTimeout}ms, wall=${wallClockTimeout}ms)`);
 
     const extractionPromises = resultsToProcess.map(async (result): Promise<SearchResult> => {
+      const controller = new AbortController();
+      let timeoutHandle: NodeJS.Timeout | undefined;
       try {
-        const extractionPromise = this.extractContent({ url: result.url, timeout: 6000 });
         const timeoutPromise = new Promise<never>((_, reject) => {
-          setTimeout(() => reject(new Error('Content extraction timeout')), 8000);
+          timeoutHandle = setTimeout(() => {
+            controller.abort();
+            reject(new Error('Content extraction timeout'));
+          }, wallClockTimeout);
+        });
+        const extractionPromise = this.extractContent({
+          url: result.url,
+          timeout: perExtractionTimeout,
+          signal: controller.signal,
         });
         const content = await Promise.race([extractionPromise, timeoutPromise]);
+        if (timeoutHandle) clearTimeout(timeoutHandle);
         const cleanedContent = cleanText(content, this.maxContentLength);
         log.debug(`extracted: ${result.url}`);
         return {
@@ -353,6 +390,8 @@ export class EnhancedContentExtractor {
           fetchStatus: 'success' as const,
         };
       } catch (error) {
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+        controller.abort();
         log.debug(`failed to extract: ${result.url}`, error instanceof Error ? error.message : 'unknown');
         return {
           ...result,

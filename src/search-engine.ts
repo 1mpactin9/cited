@@ -18,10 +18,10 @@ export class SearchEngine {
   }
 
   async search(options: SearchOptions): Promise<SearchResultWithMetadata> {
-    const { query, numResults = 5, timeout = 10000 } = options;
+    const { query, numResults = 5, timeout = 10000, engine } = options;
     const sanitizedQuery = sanitizeQuery(query);
 
-    log.info(`searching: "${sanitizedQuery}"`);
+    log.info(`searching: "${sanitizedQuery}"${engine ? ` (forced: ${engine})` : ''}`);
 
     try {
       return await this.rateLimiter.execute(async () => {
@@ -29,11 +29,17 @@ export class SearchEngine {
         const qualityThreshold = parseFloat(process.env.RELEVANCE_THRESHOLD || '0.3');
         const forceMultiEngine = process.env.FORCE_MULTI_ENGINE_SEARCH === 'true';
 
-        const approaches = [
-          { method: this.tryBrowserBingSearch.bind(this), name: 'Browser Bing' },
-          { method: this.tryBrowserBraveSearch.bind(this), name: 'Browser Brave' },
-          { method: this.tryDuckDuckGoSearch.bind(this), name: 'Axios DuckDuckGo' },
+        const allApproaches = [
+          { method: this.tryBrowserBingSearch.bind(this), name: 'Browser Bing', key: 'bing' },
+          { method: this.tryBrowserBraveSearch.bind(this), name: 'Browser Brave', key: 'brave' },
+          { method: this.tryDuckDuckGoSearch.bind(this), name: 'Axios DuckDuckGo', key: 'duckduckgo' },
         ];
+        const approaches = engine
+          ? allApproaches.filter(a => a.key === engine)
+          : allApproaches;
+        if (engine && approaches.length === 0) {
+          throw new Error(`Unknown engine: ${engine}`);
+        }
 
         let bestResults: SearchResult[] = [];
         let bestEngine = 'None';

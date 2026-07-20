@@ -14,12 +14,14 @@ export interface SearchOptions {
   query: string;
   numResults?: number;
   timeout?: number;
+  engine?: string;
 }
 
 export interface ContentExtractionOptions {
   url: string;
   timeout?: number;
   maxContentLength?: number;
+  signal?: AbortSignal;
 }
 
 export interface WebSearchToolInput {
@@ -27,6 +29,8 @@ export interface WebSearchToolInput {
   limit?: number;
   includeContent?: boolean;
   maxContentLength?: number;
+  engine?: string;
+  timeout?: number;
 }
 
 export interface WebSearchToolOutput {
