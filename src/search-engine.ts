@@ -3,18 +3,22 @@ import * as cheerio from 'cheerio';
 import { SearchOptions, SearchResult, SearchResultWithMetadata } from './types.js';
 import { generateTimestamp, sanitizeQuery } from './utils.js';
 import { RateLimiter } from './rate-limiter.js';
+import { BrowserPool } from './browser-pool.js';
 import { createLogger } from './logger.js';
 
 const log = createLogger('SearchEngine');
 
 const BING_USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36';
+const BRAVE_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
 const DDG_USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
 export class SearchEngine {
   private readonly rateLimiter: RateLimiter;
+  private readonly browserPool: BrowserPool;
 
-  constructor() {
+  constructor(browserPool?: BrowserPool) {
     this.rateLimiter = new RateLimiter(10);
+    this.browserPool = browserPool ?? new BrowserPool();
   }
 
   async search(options: SearchOptions): Promise<SearchResultWithMetadata> {
@@ -95,39 +99,26 @@ export class SearchEngine {
   }
 
   private async tryBrowserBraveSearch(query: string, numResults: number, timeout: number): Promise<SearchResult[]> {
+    let lastErr: unknown;
     for (let attempt = 1; attempt <= 2; attempt++) {
-      let browser;
       try {
-        const { chromium } = await import('playwright');
-        browser = await chromium.launch({
-          headless: true,
-          args: [
-            '--headless=new',
-            '--no-sandbox',
-            '--disable-blink-features=AutomationControlled',
-            '--disable-dev-shm-usage',
-            '--disable-gpu',
-          ],
-        });
+        const browser = await this.browserPool.getBrowser();
         log.debug(`brave attempt ${attempt}/2`);
         return await this.tryBrowserBraveSearchInternal(browser, query, numResults, Math.min(timeout / 2, 6000));
       } catch (error) {
+        lastErr = error;
         log.debug(`brave attempt ${attempt}/2 failed`, error instanceof Error ? error.message : error);
         if (attempt === 2) throw error;
         await new Promise(resolve => setTimeout(resolve, 500));
-      } finally {
-        if (browser) {
-          try { await browser.close(); } catch (error) { log.debug('error closing brave browser', error); }
-        }
       }
     }
-    throw new Error('All Brave search attempts failed');
+    throw lastErr ?? new Error('All Brave search attempts failed');
   }
 
   private async tryBrowserBraveSearchInternal(browser: any, query: string, numResults: number, timeout: number): Promise<SearchResult[]> {
     if (!browser.isConnected()) throw new Error('Browser is not connected');
     const context = await browser.newContext({
-      userAgent: BING_USER_AGENT,
+      userAgent: BRAVE_USER_AGENT,
       viewport: { width: 1366, height: 768 },
       locale: 'en-US',
       timezoneId: 'America/New_York',
@@ -152,35 +143,22 @@ export class SearchEngine {
   }
 
   private async tryBrowserBingSearch(query: string, numResults: number, timeout: number): Promise<SearchResult[]> {
+    let lastErr: unknown;
     for (let attempt = 1; attempt <= 2; attempt++) {
-      let browser;
       try {
-        const { chromium } = await import('playwright');
-        browser = await chromium.launch({
-          headless: true,
-          args: [
-            '--headless=new',
-            '--no-sandbox',
-            '--disable-blink-features=AutomationControlled',
-            '--disable-dev-shm-usage',
-            '--disable-gpu',
-          ],
-        });
+        const browser = await this.browserPool.getBrowser();
         log.debug(`bing attempt ${attempt}/2`);
         const results = await this.tryBrowserBingSearchInternal(browser, query, numResults, timeout);
         log.debug(`bing returned ${results.length} results`);
         return results;
       } catch (error) {
+        lastErr = error;
         log.debug(`bing attempt ${attempt}/2 failed`, error instanceof Error ? error.message : error);
         if (attempt === 2) throw error;
         await new Promise(resolve => setTimeout(resolve, 500));
-      } finally {
-        if (browser) {
-          try { await browser.close(); } catch (error) { log.debug('error closing bing browser', error); }
-        }
       }
     }
-    throw new Error('All Bing search attempts failed');
+    throw lastErr ?? new Error('All Bing search attempts failed');
   }
 
   private async tryBrowserBingSearchInternal(browser: any, query: string, numResults: number, timeout: number): Promise<SearchResult[]> {
@@ -576,5 +554,7 @@ export class SearchEngine {
     return totalScore / results.length;
   }
 
-  async closeAll(): Promise<void> {}
+  async closeAll(): Promise<void> {
+    await this.browserPool.closeAll();
+  }
 }

@@ -7,6 +7,8 @@ import { createLogger } from './logger.js';
 
 const log = createLogger('ContentExtractor');
 
+type QualityIssue = 'ok' | 'bot-marker' | 'thin' | 'chrome-heavy';
+
 export class EnhancedContentExtractor {
   private readonly defaultTimeout: number;
   private readonly maxContentLength: number;
@@ -40,7 +42,8 @@ export class EnhancedContentExtractor {
         try {
           const content = await this.extractWithBrowser(options);
           log.debug(`browser extracted ${content.length} chars: ${url}`);
-          if (this.isLowQualityContent(content, true)) {
+          const issue = this.assessContentQuality(content, true);
+          if (issue === 'bot-marker' || issue === 'chrome-heavy') {
             throw new Error('thin content — likely JS-only or gated page');
           }
           return content;
@@ -243,11 +246,10 @@ export class EnhancedContentExtractor {
     return indicators.some(indicator => indicator === true);
   }
 
-  private isLowQualityContent(content: string, hadScripts: boolean = false): boolean {
+  private assessContentQuality(content: string, hadScripts: boolean = false): QualityIssue {
     const trimmed = content.trim();
-    if (trimmed === '') return true;
+    if (trimmed === '') return 'thin';
 
-    // Explicit bot-detection / JS-required markers
     const badMarkers = [
       /please enable javascript/i,
       /you need to enable javascript/i,
@@ -263,26 +265,25 @@ export class EnhancedContentExtractor {
       /loading\.{2,}/i,
       /please wait\b.{0,40}(loading|verify)/i,
     ];
-    if (badMarkers.some(re => re.test(trimmed))) return true;
+    if (badMarkers.some(re => re.test(trimmed))) return 'bot-marker';
 
-    // Structural checks
     const words = trimmed.split(/\s+/).filter(w => w.length > 0);
     const wordCount = words.length;
 
-    // Thin content on a JS-heavy page: axios likely missed the real content
-    if (wordCount < 100 && hadScripts) return true;
+    if (wordCount < 100 && hadScripts) return 'thin';
+    if (wordCount < 30) return 'thin';
 
-    // Very thin content period
-    if (wordCount < 30) return true;
-
-    // Chrome-heavy content: repetitive nav/menu text has poor unique-word ratio
     if (wordCount >= 80) {
       const sample = words.slice(0, 400).map(w => w.toLowerCase());
       const uniqueRatio = new Set(sample).size / sample.length;
-      if (uniqueRatio < 0.35) return true;
+      if (uniqueRatio < 0.35) return 'chrome-heavy';
     }
 
-    return false;
+    return 'ok';
+  }
+
+  private isLowQualityContent(content: string, hadScripts: boolean = false): boolean {
+    return this.assessContentQuality(content, hadScripts) !== 'ok';
   }
 
   private getRandomHeaders(): Record<string, string> {
@@ -409,6 +410,12 @@ export class EnhancedContentExtractor {
     const successfulResults = allResults.filter(r => r.fetchStatus === 'success');
     const failedResults = allResults.filter(r => r.fetchStatus === 'error');
 
+    // Demote thin-but-valid content below substantive successes so top results
+    // are the most substantive. Thin results keep fetchStatus: 'success' since
+    // they are legitimately fetched content, just short.
+    const substantiveResults = successfulResults.filter(r => (r.wordCount ?? 0) >= 30);
+    const thinResults = successfulResults.filter(r => (r.wordCount ?? 0) < 30);
+
     // Log failure summary at info level
     if (failedResults.length > 0) {
       const reasonCounts = new Map<string, number>();
@@ -422,9 +429,10 @@ export class EnhancedContentExtractor {
       log.info(`extraction failures: ${summary}`);
     }
 
+    const rankedSuccesses = [...substantiveResults, ...thinResults];
     const enhancedResults = [
-      ...successfulResults.slice(0, targetCount),
-      ...failedResults.slice(0, Math.max(0, targetCount - successfulResults.length)),
+      ...rankedSuccesses.slice(0, targetCount),
+      ...failedResults.slice(0, Math.max(0, targetCount - rankedSuccesses.length)),
     ].slice(0, targetCount);
 
     log.info(`extracted ${successfulResults.length} successful/${failedResults.length} failed of ${resultsToProcess.length} processed`);
@@ -434,7 +442,20 @@ export class EnhancedContentExtractor {
   private parseContent(html: string): string {
     const $ = cheerio.load(html);
 
-    // Extract main content BEFORE removing structural elements
+    // Strip decorative and structural chrome FIRST so it can't leak into
+    // main-content selectors that wrap it (e.g. Wikipedia's .mw-parser-output
+    // contains <style> blocks and the language sidebar).
+    $('script, style, noscript, iframe, img, video, audio, canvas, svg, object, embed, applet, form, input, textarea, select, button, label, fieldset, legend, optgroup, option').remove();
+    $('nav, header, footer, .nav, .header, .footer, .sidebar, .menu, .breadcrumb, aside, .ad, .advertisement, .ads, .advertisement-container, .social-share, .share-buttons, .comments, .comment-section, .related-posts, .recommendations, .newsletter-signup, .cookie-notice, .privacy-notice, .terms-notice, .disclaimer, .legal, .copyright, .meta, .metadata, .author-info, .publish-date, .tags, .categories, .navigation, .pagination, .search-box, .search-form, .login-form, .signup-form, .newsletter, .popup, .modal, .overlay, .tooltip, .toolbar, .ribbon, .banner, .promo, .sponsored, .affiliate, .tracking, .analytics, .pixel, .beacon').remove();
+    $('[class^="ad-"], [class*=" ad-"], [id^="ad-"], [id*="-ad"]').remove();
+    $('[data-src*="image"], [data-src*="img"], [data-src*="photo"], [data-src*="picture"]').remove();
+    $('[style*="background-image"]').remove();
+
+    // Wikipedia-specific chrome (edit links, TOC, navboxes, language sidebar, etc.)
+    $('.mw-editsection, #toc, .navbox, .infobox, .reference, .mw-references-wrap, .catlinks, .mw-jump-link, #siteSub, #contentSub, .hatnote, .vector-menu, [class^="vector-menu"], #p-lang, .mw-portlet-lang, .mw-indicators, .noprint, .printfooter, .thumbcaption, .thumb').remove();
+    $('.mw-parser-output .toc').remove();
+
+    // Extract main content from the cleaned DOM
     let mainContent = '';
     const contentSelectors = [
       'article',
@@ -465,13 +486,6 @@ export class EnhancedContentExtractor {
         if (mainContent.length >= 50) break;
       }
     }
-
-    // Remove decorative elements from full page
-    $('script, style, noscript, iframe, img, video, audio, canvas, svg, object, embed, applet, form, input, textarea, select, button, label, fieldset, legend, optgroup, option').remove();
-    $('nav, header, footer, .nav, .header, .footer, .sidebar, .menu, .breadcrumb, aside, .ad, .advertisement, .ads, .advertisement-container, .social-share, .share-buttons, .comments, .comment-section, .related-posts, .recommendations, .newsletter-signup, .cookie-notice, .privacy-notice, .terms-notice, .disclaimer, .legal, .copyright, .meta, .metadata, .author-info, .publish-date, .tags, .categories, .navigation, .pagination, .search-box, .search-form, .login-form, .signup-form, .newsletter, .popup, .modal, .overlay, .tooltip, .toolbar, .ribbon, .banner, .promo, .sponsored, .affiliate, .tracking, .analytics, .pixel, .beacon').remove();
-    $('[class^="ad-"], [class*=" ad-"], [id^="ad-"], [id*="-ad"]').remove();
-    $('[data-src*="image"], [data-src*="img"], [data-src*="photo"], [data-src*="picture"]').remove();
-    $('[style*="background-image"]').remove();
 
     // Fallback to body text if no main content found
     if (!mainContent || mainContent.length < 50) {

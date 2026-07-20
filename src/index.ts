@@ -5,7 +5,7 @@ import { fileURLToPath } from 'url';
 import { SearchEngine } from './search-engine.js';
 import { EnhancedContentExtractor } from './enhanced-content-extractor.js';
 import { WebSearchToolInput, WebSearchToolOutput, SearchResult } from './types.js';
-import { isPdfUrl } from './utils.js';
+import { isPdfUrl, getWordCount } from './utils.js';
 import { createLogger } from './logger.js';
 
 const log = createLogger('CLI');
@@ -16,6 +16,7 @@ const __dirname = dirname(__filename);
 const packageJson = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf-8'));
 const VERSION = packageJson.version;
 const PROGRAM = 'cited';
+const JSON_DEFAULT_MAX_CONTENT = 4000;
 
 class UserError extends Error {}
 
@@ -43,13 +44,15 @@ USAGE
 SEARCH OPTIONS
   --limit <n>            Number of results to return (1-10, default 5)
   --no-content           Return only search snippets; skip fetching page content
-  --max-content <chars>  Max characters of content per result (0 = no limit)
+  --max-content <chars>  Max characters of content per result (0 = no limit).
+                         With --json, defaults to ${JSON_DEFAULT_MAX_CONTENT} chars; use 0 for no cap.
   --engine <name>        Force a specific engine: bing | brave | duckduckgo
   --timeout <ms>         Per-fetch wall-clock timeout in milliseconds (default 8000)
   --json                 Emit structured JSON on stdout (agent-friendly)
 
 PAGE OPTIONS
-  --max-content <chars>  Max characters of extracted content (0 = no limit)
+  --max-content <chars>  Max characters of extracted content (0 = no limit).
+                         With --json, defaults to ${JSON_DEFAULT_MAX_CONTENT} chars; use 0 for no cap.
   --json                 Emit structured JSON on stdout
 
 GLOBAL OPTIONS
@@ -159,8 +162,7 @@ function parseArgs(argv: string[]): CliArgs {
   }
 
   if (positional.length === 0) {
-    // No arguments: show help and exit non-zero to indicate usage required
-    printHelp();
+    process.stderr.write(`${PROGRAM}: a query is required. Try '${PROGRAM} --help' or '${PROGRAM} "your query"'.\n`);
     process.exit(1);
     return args; // unreachable, satisfies TS
   }
@@ -260,12 +262,15 @@ function formatFullResultsJson(result: WebSearchToolOutput, maxContentLength?: n
     search_time_ms: result.search_time_ms,
     results: result.results.map(r => {
       const desc = isPlaceholderDescription(r.description) ? '' : r.description;
-      const content = r.fullContent && r.fullContent.trim() ? truncate(r.fullContent, maxContentLength) : '';
+      const raw = r.fullContent && r.fullContent.trim() ? r.fullContent : '';
+      const content = raw ? truncate(raw, maxContentLength) : '';
+      const truncated = !!(raw && maxContentLength && maxContentLength > 0 && raw.length > maxContentLength);
       return omitEmpty({
         title: r.title,
         url: r.url,
         description: desc,
         content,
+        truncated: truncated ? true : undefined,
         wordCount: r.wordCount || undefined,
         fetchStatus: r.fetchStatus,
         error: r.error,
@@ -290,9 +295,11 @@ function formatSummariesJson(query: string, results: Array<{ title: string; url:
 
 function formatSinglePageJson(url: string, content: string, maxContentLength?: number): string {
   const wordCount = content.split(/\s+/).filter(w => w.length > 0).length;
+  const truncated = !!(content && maxContentLength && maxContentLength > 0 && content.length > maxContentLength);
   const payload = omitEmpty({
     url,
     content: truncate(content, maxContentLength),
+    truncated: truncated ? true : undefined,
     wordCount,
     fetchStatus: content.trim() ? 'success' : 'error',
   });
@@ -382,7 +389,8 @@ async function runSearch(
     );
     log.info(`search completed, ${result.results.length} results`);
     if (args.json) {
-      process.stdout.write(formatFullResultsJson(result, args.maxContentLength));
+      const effectiveMax = args.maxContentLength === undefined ? JSON_DEFAULT_MAX_CONTENT : args.maxContentLength;
+      process.stdout.write(formatFullResultsJson(result, effectiveMax));
     } else {
       process.stdout.write(formatFullResults(result, args.maxContentLength));
     }
@@ -413,8 +421,15 @@ async function runPage(args: CliArgs, contentExtractor: EnhancedContentExtractor
     timeout: args.timeout,
   });
   log.info(`single page extracted ${content.length} characters`);
+  if (content.trim()) {
+    const words = getWordCount(content);
+    if (words < 30) {
+      log.warn(`extracted content is short (${words} words) — page may be a stub or index`);
+    }
+  }
   if (args.json) {
-    process.stdout.write(formatSinglePageJson(args.url, content, args.maxContentLength));
+    const effectiveMax = args.maxContentLength === undefined ? JSON_DEFAULT_MAX_CONTENT : args.maxContentLength;
+    process.stdout.write(formatSinglePageJson(args.url, content, effectiveMax));
   } else {
     process.stdout.write(formatSinglePage(args.url, content, args.maxContentLength));
   }
