@@ -1,47 +1,69 @@
 export interface SearchResult {
   title: string;
   url: string;
-  description: string;
-  fullContent: string;
-  contentPreview: string;
-  wordCount: number;
-  timestamp: string;
-  fetchStatus: 'success' | 'error' | 'timeout';
+  content: string;
+  score?: number;
+  publishedDate?: string;
+}
+
+export interface ExtractedContent {
+  url: string;
+  title?: string;
+  content: string;
+  author?: string;
+  publishedDate?: string;
+}
+
+export interface CrawlResult {
+  url: string;
+  title?: string;
+  content?: string;
+}
+
+export interface ApiResponse<T> {
+  success: boolean;
+  data?: T;
   error?: string;
+  provider: string;
+}
+
+export interface WebDataProvider {
+  name: string;
+  hasApiKey: boolean;
+
+  search?(query: string, options?: SearchOptions): Promise<ApiResponse<SearchResult[]>>;
+  extract?(urls: string | string[], options?: ExtractOptions): Promise<ApiResponse<ExtractedContent[]>>;
+  fetch?(url: string): Promise<ApiResponse<string>>;
+  crawl?(url: string, options?: CrawlOptions): Promise<ApiResponse<CrawlResult[]>>;
+  research?(query: string, options?: ResearchOptions): Promise<ApiResponse<string>>;
 }
 
 export interface SearchOptions {
-  query: string;
-  numResults?: number;
-  timeout?: number;
-  engine?: string;
+  maxResults?: number;
+  searchDepth?: 'basic' | 'advanced';
+  includeDomains?: string[];
+  excludeDomains?: string[];
+  timeRange?: 'day' | 'week' | 'month' | 'year';
 }
 
-export interface ContentExtractionOptions {
-  url: string;
-  timeout?: number;
-  maxContentLength?: number;
-  signal?: AbortSignal;
+export interface ExtractOptions {
+  query?: string;
+  extractDepth?: 'basic' | 'advanced';
+  format?: 'markdown' | 'text';
 }
 
-export interface WebSearchToolInput {
-  query: string;
-  limit?: number;
-  includeContent?: boolean;
-  maxContentLength?: number;
-  engine?: string;
-  timeout?: number;
+export interface CrawlOptions {
+  maxPages?: number;
+  extractContent?: boolean;
 }
 
-export interface WebSearchToolOutput {
-  results: SearchResult[];
-  total_results: number;
-  search_time_ms: number;
-  query: string;
-  status?: string;
+export interface ResearchOptions {
+  model?: 'mini' | 'pro';
 }
 
-export interface SearchResultWithMetadata {
-  results: SearchResult[];
-  engine: string;
+export interface CommandOptions {
+  provider?: string;
+  output?: 'json' | 'text';
 }
+
+export type TaskType = 'search' | 'fetch' | 'extract' | 'crawl' | 'research';
