@@ -26,6 +26,7 @@ interface CliArgs {
   limit: number;
   includeContent: boolean;
   maxContentLength?: number;
+  json: boolean;
 }
 
 function printHelp(): void {
@@ -40,9 +41,11 @@ SEARCH OPTIONS
   --limit <n>            Number of results to return (1-10, default 5)
   --no-content           Return only search snippets; skip fetching page content
   --max-content <chars>  Max characters of content per result (0 = no limit)
+  --json                 Emit structured JSON on stdout (agent-friendly)
 
 PAGE OPTIONS
   --max-content <chars>  Max characters of extracted content (0 = no limit)
+  --json                 Emit structured JSON on stdout
 
 GLOBAL OPTIONS
   -h, --help             Show this help
@@ -51,6 +54,7 @@ GLOBAL OPTIONS
 EXAMPLES
   ${PROGRAM} "effects of sleep on memory"
   ${PROGRAM} effects of sleep on memory --limit 3 --no-content
+  ${PROGRAM} "effects of sleep on memory" --json
   ${PROGRAM} page https://example.com/article --max-content 2000
 
 ENVIRONMENT
@@ -72,10 +76,11 @@ function parseArgs(argv: string[]): CliArgs {
     limit: 5,
     includeContent: true,
     maxContentLength: undefined,
+    json: false,
   };
 
   const positional: string[] = [];
-  const knownFlags = ['-h', '--help', '-v', '--version', '--no-content', '--limit', '--max-content'];
+  const knownFlags = ['-h', '--help', '-v', '--version', '--no-content', '--limit', '--max-content', '--json'];
   // Pre-validate: reject unrecognized flags before any parsing
   for (let i = 0; i < argv.length; i++) {
     const tok = argv[i];
@@ -100,6 +105,9 @@ function parseArgs(argv: string[]): CliArgs {
         return args;
       case '--no-content':
         args.includeContent = false;
+        break;
+      case '--json':
+        args.json = true;
         break;
       case '--limit': {
         const val = argv[++i];
@@ -162,7 +170,7 @@ function parseArgs(argv: string[]): CliArgs {
   for (const tok of argv.slice(2)) {
     if (tok.startsWith('--') || (tok.startsWith('-') && tok.length > 2 && !/^\d+$/.test(tok))) {
       // Skip known flags and their values
-      const knownFlags = ['-h', '--help', '-v', '--version', '--no-content', '--limit', '--max-content'];
+      const knownFlags = ['-h', '--help', '-v', '--version', '--no-content', '--limit', '--max-content', '--json'];
       if (!knownFlags.includes(tok)) {
         throw new UserError(`Unrecognized option: ${tok}. Use --help for usage information.`);
       }
@@ -179,20 +187,25 @@ function truncate(text: string, max?: number): string {
   return text.substring(0, max) + `\n\n[Content truncated at ${max} characters]`;
 }
 
+function isPlaceholderDescription(d: string): boolean {
+  const t = d.trim();
+  return t === '' || t === 'No description available';
+}
+
 function formatFullResults(result: WebSearchToolOutput, maxContentLength?: number): string {
-  let text = `Search completed for "${result.query}" with ${result.total_results} results:\n\n`;
-  if (result.status) text += `**Status:** ${result.status}\n\n`;
+  let text = `Search: "${result.query}" — ${result.total_results} result(s)\n\n`;
 
   result.results.forEach((r, idx) => {
-    text += `**${idx + 1}. ${r.title}**\n`;
-    text += `URL: ${r.url}\n`;
-    text += `Description: ${r.description}\n`;
+    text += `[${idx + 1}] ${r.title} — ${r.url}\n`;
+    if (!isPlaceholderDescription(r.description)) {
+      text += `${r.description}\n`;
+    }
     if (r.fullContent && r.fullContent.trim()) {
-      text += `\n**Full Content:**\n${truncate(r.fullContent, maxContentLength)}\n`;
+      text += `\n${truncate(r.fullContent, maxContentLength)}\n`;
     } else if (r.contentPreview && r.contentPreview.trim()) {
-      text += `\n**Content Preview:**\n${truncate(r.contentPreview, maxContentLength)}\n`;
+      text += `\n${truncate(r.contentPreview, maxContentLength)}\n`;
     } else if (r.fetchStatus === 'error') {
-      text += `\n**Content Extraction Failed:** ${r.error}\n`;
+      text += `\n[extraction failed: ${r.error || 'unknown'}]\n`;
     }
     text += `\n---\n\n`;
   });
@@ -200,26 +213,75 @@ function formatFullResults(result: WebSearchToolOutput, maxContentLength?: numbe
 }
 
 function formatSummaries(query: string, results: Array<{ title: string; url: string; description: string }>): string {
-  let text = `Search summaries for "${query}" with ${results.length} results:\n\n`;
+  let text = `Search: "${query}" — ${results.length} result(s)\n\n`;
   results.forEach((r, i) => {
-    text += `**${i + 1}. ${r.title}**\n`;
-    text += `URL: ${r.url}\n`;
-    text += `Description: ${r.description}\n`;
+    text += `[${i + 1}] ${r.title} — ${r.url}\n`;
+    if (!isPlaceholderDescription(r.description)) {
+      text += `${r.description}\n`;
+    }
     text += `\n---\n\n`;
   });
   return text;
 }
 
 function formatSinglePage(url: string, content: string, maxContentLength?: number): string {
-  const urlObj = new URL(url);
-  const title = urlObj.hostname + urlObj.pathname;
-  const wordCount = content.split(/\s+/).filter(word => word.length > 0).length;
-  let text = `**Page Content from: ${url}**\n\n`;
-  text += `**Title:** ${title}\n`;
-  text += `**Word Count:** ${wordCount}\n`;
-  text += `**Content Length:** ${content.length} characters\n\n`;
-  text += `**Content:**\n${truncate(content, maxContentLength)}`;
-  return text;
+  return `Page: ${url}\n\n${truncate(content, maxContentLength)}\n`;
+}
+
+function omitEmpty<T extends Record<string, unknown>>(obj: T): Partial<T> {
+  const out: Partial<T> = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (v === undefined || v === null) continue;
+    if (typeof v === 'string' && v.trim() === '') continue;
+    (out as Record<string, unknown>)[k] = v;
+  }
+  return out;
+}
+
+function formatFullResultsJson(result: WebSearchToolOutput, maxContentLength?: number): string {
+  const payload = {
+    query: result.query,
+    total_results: result.total_results,
+    search_time_ms: result.search_time_ms,
+    results: result.results.map(r => {
+      const desc = isPlaceholderDescription(r.description) ? '' : r.description;
+      const content = r.fullContent && r.fullContent.trim() ? truncate(r.fullContent, maxContentLength) : '';
+      return omitEmpty({
+        title: r.title,
+        url: r.url,
+        description: desc,
+        content,
+        wordCount: r.wordCount || undefined,
+        fetchStatus: r.fetchStatus,
+        error: r.error,
+      });
+    }),
+  };
+  return JSON.stringify(payload) + '\n';
+}
+
+function formatSummariesJson(query: string, results: Array<{ title: string; url: string; description: string }>): string {
+  const payload = {
+    query,
+    total_results: results.length,
+    results: results.map(r => omitEmpty({
+      title: r.title,
+      url: r.url,
+      description: isPlaceholderDescription(r.description) ? '' : r.description,
+    })),
+  };
+  return JSON.stringify(payload) + '\n';
+}
+
+function formatSinglePageJson(url: string, content: string, maxContentLength?: number): string {
+  const wordCount = content.split(/\s+/).filter(w => w.length > 0).length;
+  const payload = omitEmpty({
+    url,
+    content: truncate(content, maxContentLength),
+    wordCount,
+    fetchStatus: content.trim() ? 'success' : 'error',
+  });
+  return JSON.stringify(payload) + '\n';
 }
 
 function categorizeError(errorMessage: string): string {
@@ -281,6 +343,8 @@ async function handleWebSearch(
     combinedStatus += `; extracted: ${successCount}; failed: ${failedResults.length}; results: ${enhancedResults.length}`;
   }
 
+  log.info(combinedStatus);
+
   return {
     results: enhancedResults,
     total_results: enhancedResults.length,
@@ -302,7 +366,11 @@ async function runSearch(
       contentExtractor
     );
     log.info(`search completed, ${result.results.length} results`);
-    process.stdout.write(formatFullResults(result, args.maxContentLength));
+    if (args.json) {
+      process.stdout.write(formatFullResultsJson(result, args.maxContentLength));
+    } else {
+      process.stdout.write(formatFullResults(result, args.maxContentLength));
+    }
   } else {
     log.info('summaries', { query: args.query, limit: args.limit });
     const searchResponse = await searchEngine.search({ query: args.query, numResults: args.limit });
@@ -312,7 +380,11 @@ async function runSearch(
       description: item.description,
     }));
     log.info(`summaries completed, ${summaryResults.length} results`);
-    process.stdout.write(formatSummaries(args.query, summaryResults));
+    if (args.json) {
+      process.stdout.write(formatSummariesJson(args.query, summaryResults));
+    } else {
+      process.stdout.write(formatSummaries(args.query, summaryResults));
+    }
   }
 }
 
@@ -323,7 +395,11 @@ async function runPage(args: CliArgs, contentExtractor: EnhancedContentExtractor
     maxContentLength: args.maxContentLength,
   });
   log.info(`single page extracted ${content.length} characters`);
-  process.stdout.write(formatSinglePage(args.url, content, args.maxContentLength));
+  if (args.json) {
+    process.stdout.write(formatSinglePageJson(args.url, content, args.maxContentLength));
+  } else {
+    process.stdout.write(formatSinglePage(args.url, content, args.maxContentLength));
+  }
 }
 
 async function main(): Promise<void> {

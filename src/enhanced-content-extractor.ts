@@ -38,10 +38,14 @@ export class EnhancedContentExtractor {
         try {
           const content = await this.extractWithBrowser(options);
           log.debug(`browser extracted ${content.length} chars: ${url}`);
+          if (this.isLowQualityContent(content, true)) {
+            throw new Error('thin content — likely JS-only or gated page');
+          }
           return content;
         } catch (browserError) {
           log.error(`browser extraction also failed: ${url}`, browserError);
-          throw new Error(`Both axios and browser extraction failed for ${url}`);
+          const msg = browserError instanceof Error ? browserError.message : String(browserError);
+          throw new Error(`Both axios and browser extraction failed for ${url}: ${msg}`);
         }
       }
       throw error;
@@ -56,12 +60,14 @@ export class EnhancedContentExtractor {
       validateStatus: (status: number) => status < 400,
     });
 
-    let content = this.parseContent(response.data);
+    const rawHtml = typeof response.data === 'string' ? response.data : '';
+    const hadScripts = /<script[\s>]/i.test(rawHtml);
+    let content = this.parseContent(rawHtml || response.data);
     if (maxContentLength && content.length > maxContentLength) {
       content = content.substring(0, maxContentLength);
     }
-    if (this.isLowQualityContent(content)) {
-      throw new Error('Low quality content detected - likely bot detection');
+    if (this.isLowQualityContent(content, hadScripts)) {
+      throw new Error('Low quality content detected - likely bot detection or JS-only page');
     }
     return content;
   }
@@ -212,18 +218,46 @@ export class EnhancedContentExtractor {
     return indicators.some(indicator => indicator === true);
   }
 
-  private isLowQualityContent(content: string): boolean {
-    // Only flag as low quality when we see clear bot-detection signals, not just short content
-    const lowQualityIndicators = [
-      content.includes('Please enable JavaScript'),
-      content.includes('Access Denied'),
-      content.includes('403 Forbidden'),
-      content.includes('captcha'),
-      content.includes('unusual traffic'),
-      content.includes('robot'),
-      content.trim() === '',
+  private isLowQualityContent(content: string, hadScripts: boolean = false): boolean {
+    const trimmed = content.trim();
+    if (trimmed === '') return true;
+
+    // Explicit bot-detection / JS-required markers
+    const badMarkers = [
+      /please enable javascript/i,
+      /you need to enable javascript/i,
+      /enable javascript to (view|run|use)/i,
+      /access denied/i,
+      /403 forbidden/i,
+      /captcha/i,
+      /unusual traffic/i,
+      /are you a robot/i,
+      /this will only take a few seconds/i,
+      /just a moment\.\.\./i,
+      /checking your browser/i,
+      /loading\.{2,}/i,
+      /please wait\b.{0,40}(loading|verify)/i,
     ];
-    return lowQualityIndicators.some(indicator => indicator === true);
+    if (badMarkers.some(re => re.test(trimmed))) return true;
+
+    // Structural checks
+    const words = trimmed.split(/\s+/).filter(w => w.length > 0);
+    const wordCount = words.length;
+
+    // Thin content on a JS-heavy page: axios likely missed the real content
+    if (wordCount < 100 && hadScripts) return true;
+
+    // Very thin content period
+    if (wordCount < 30) return true;
+
+    // Chrome-heavy content: repetitive nav/menu text has poor unique-word ratio
+    if (wordCount >= 80) {
+      const sample = words.slice(0, 400).map(w => w.toLowerCase());
+      const uniqueRatio = new Set(sample).size / sample.length;
+      if (uniqueRatio < 0.35) return true;
+    }
+
+    return false;
   }
 
   private getRandomHeaders(): Record<string, string> {
@@ -417,6 +451,21 @@ export class EnhancedContentExtractor {
     text = text.replace(/\n\s*\n/g, '\n');
     text = text.replace(/\r\n/g, '\n');
     text = text.replace(/\r/g, '\n');
+
+    // Strip common UI/chrome phrases that survive selector removal
+    const chromePhrases = [
+      /\b\d+\s*min(ute)?\s*read\b/gi,
+      /\bshare\s+article\b/gi,
+      /\barticle\s+outro\b/gi,
+      /\btable of contents\b/gi,
+      /\bsubscribe to (our )?newsletter\b/gi,
+      /\bskip to (main )?content\b/gi,
+      /\bcookie (settings|preferences|policy)\b/gi,
+      /\bsign (up|in) (for|to)\b/gi,
+    ];
+    for (const re of chromePhrases) text = text.replace(re, '');
+    text = text.replace(/\s+/g, ' ');
+
     return text.trim();
   }
 

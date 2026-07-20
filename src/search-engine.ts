@@ -301,44 +301,72 @@ export class SearchEngine {
         if ($element.attr('class')?.toLowerCase().includes('sponsored') ||
             $element.attr('class')?.toLowerCase().includes('ad-')) return;
 
-        const titleSelectors = ['.title a', 'h2 a', '.result-title a', 'a[href*="://"]', '.snippet-title a'];
+        // Drop breadcrumb/favicon chrome before scraping text, so title/snippet lookups don't pick them up
+        $element.find('.snippet-url, .site-name-wrapper, .favicon, .favicon-wrapper, cite').remove();
+
+        // Title: Brave's current DOM uses .title.search-snippet-title; older classes as fallback
         let title = '';
         let url = '';
-        for (const titleSelector of titleSelectors) {
-          const $titleElement = $element.find(titleSelector).first();
-          if ($titleElement.length) {
-            title = $titleElement.text().trim();
-            // Remove breadcrumb-like suffixes (e.g., "TypeScript typescriptlang.org")
-            title = title.replace(/\s+(typescriptlang\.org|w3schools\.com|geeksforgeeks\.org|medium\.com|reddit\.com|stackoverflow\.com|github\.com).*$/i, '').trim();
-            url = $titleElement.attr('href') || '';
-            if (title && url && url.startsWith('http')) break;
+        const $titleLink = $element.find('a').filter((_i, a) => {
+          const href = $(a).attr('href') || '';
+          return /^https?:\/\//i.test(href) && $(a).find('.title, .search-snippet-title').length > 0;
+        }).first();
+        if ($titleLink.length) {
+          url = $titleLink.attr('href') || '';
+          title = $titleLink.find('.title, .search-snippet-title').first().text().trim();
+        }
+        if (!title) {
+          const titleSelectors = ['.title', '.search-snippet-title', 'h2 a', '.result-title a', 'a[href*="://"]'];
+          for (const s of titleSelectors) {
+            const $t = $element.find(s).first();
+            if ($t.length) {
+              title = $t.text().trim();
+              if (!url) {
+                const $a = $t.is('a') ? $t : $t.closest('a');
+                if ($a.length) url = $a.attr('href') || '';
+              }
+              if (title && url) break;
+            }
           }
         }
+        title = title.replace(/\s+/g, ' ').trim();
 
         // Skip titles that indicate ads
         if (title.match(/^(Sponsored|Ad|Promoted)/i)) return;
 
-        if (!title) {
-          const textContent = $element.text().trim();
-          const lines = textContent.split('\n').filter(line => line.trim().length > 0);
-          if (lines.length > 0) title = lines[0].trim();
-        }
-
-        const snippetSelectors = ['.snippet-content', '.snippet', '.description', 'p'];
+        // Snippet: prefer explicit snippet containers, filter out breadcrumb-shaped text
+        const snippetSelectors = [
+          '.snippet-description',
+          '.snippet-content .desktop-default-regular',
+          '.desktop-default-regular.line-clamp-2',
+          '.desktop-default-regular',
+          '.result-snippet',
+          '.description',
+          '.desc',
+        ];
         let snippet = '';
         for (const snippetSelector of snippetSelectors) {
           const $snippetElement = $element.find(snippetSelector).first();
           if ($snippetElement.length) {
-            snippet = $snippetElement.text().trim();
-            break;
+            const candidate = $snippetElement.text().trim().replace(/\s+/g, ' ');
+            if (this.isUsableSnippet(candidate)) { snippet = candidate; break; }
           }
+        }
+        if (!snippet) {
+          // Last resort: longest paragraph-shaped block that passes the usable check
+          let longest = '';
+          $element.find('p, div').each((_i, el) => {
+            const t = $(el).text().trim().replace(/\s+/g, ' ');
+            if (t.length > longest.length && t.length < 500 && this.isUsableSnippet(t)) longest = t;
+          });
+          if (longest.length >= 40) snippet = longest;
         }
 
         if (title && url && this.isValidSearchUrl(url)) {
           results.push({
             title,
             url: this.cleanBraveUrl(url),
-            description: snippet || 'No description available',
+            description: snippet,
             fullContent: '',
             contentPreview: '',
             wordCount: 0,
@@ -406,7 +434,7 @@ export class SearchEngine {
           results.push({
             title,
             url: this.cleanBingUrl(url),
-            description: snippet || 'No description available',
+            description: snippet,
             fullContent: '',
             contentPreview: '',
             wordCount: 0,
@@ -435,12 +463,14 @@ export class SearchEngine {
       const $titleElement = $element.find('.result__title a');
       const title = $titleElement.text().trim();
       const url = $titleElement.attr('href');
-      const snippet = $element.find('.result__snippet').text().trim();
+      let snippet = $element.find('.result__snippet').text().trim();
+      if (!snippet) snippet = $element.find('.result__body').text().trim();
+      snippet = snippet.replace(/\s+/g, ' ');
       if (title && url) {
         results.push({
           title,
           url: this.cleanDuckDuckGoUrl(url),
-          description: snippet || 'No description available',
+          description: snippet,
           fullContent: '',
           contentPreview: '',
           wordCount: 0,
@@ -450,6 +480,19 @@ export class SearchEngine {
       }
     });
     return results;
+  }
+
+  private isUsableSnippet(text: string): boolean {
+    if (text.length < 20) return false;
+    // Pure URL / hostname
+    if (/^https?:\/\//i.test(text)) return false;
+    if (/^[\w.-]+\.[a-z]{2,}\s*(›|»|\/|$)/i.test(text) && text.split(/\s+/).length < 8) return false;
+    // Breadcrumb-only: has › or » and no sentence-ending punctuation in first 200 chars
+    const head = text.slice(0, 200);
+    if (/[›»]/.test(head) && !/[.!?]\s/.test(head)) return false;
+    // Timestamp-only snippets ("3 hours ago", "2 min read")
+    if (/^\d+\s*(min|sec|hour|day|week|month|year)/i.test(text)) return false;
+    return true;
   }
 
   private isValidSearchUrl(url: string): boolean {
