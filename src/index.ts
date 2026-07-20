@@ -75,6 +75,18 @@ function parseArgs(argv: string[]): CliArgs {
   };
 
   const positional: string[] = [];
+  const knownFlags = ['-h', '--help', '-v', '--version', '--no-content', '--limit', '--max-content'];
+  // Pre-validate: reject unrecognized flags before any parsing
+  for (let i = 0; i < argv.length; i++) {
+    const tok = argv[i];
+    if ((tok.startsWith('--') || (tok.startsWith('-') && tok.length > 2 && !/^\d+$/.test(tok))) && !knownFlags.includes(tok)) {
+      // Check if it's a flag value (preceded by --limit or --max-content)
+      const prev = argv[i - 1];
+      if (prev === '--limit' || prev === '--max-content') continue;
+      throw new UserError(`Unrecognized option: ${tok}. Use --help for usage information.`);
+    }
+  }
+
   for (let i = 0; i < argv.length; i++) {
     const tok = argv[i];
     switch (tok) {
@@ -112,7 +124,14 @@ function parseArgs(argv: string[]): CliArgs {
     }
   }
 
-  if (positional.length === 0 || positional[0] === 'help') {
+  if (positional.length === 0) {
+    // No arguments: show help and exit non-zero to indicate usage required
+    printHelp();
+    process.exit(1);
+    return args; // unreachable, satisfies TS
+  }
+
+  if (positional[0] === 'help') {
     args.command = 'help';
     return args;
   }
@@ -130,6 +149,24 @@ function parseArgs(argv: string[]): CliArgs {
     }
     args.url = url;
     return args;
+  }
+
+  // Reject 'version' as a bare positional — it's only valid as --version / -v
+  if (positional[0] === 'version') {
+    printHelp();
+    process.stderr.write('\nError: "version" is not a search query. Use -v or --version to show version.\n\n');
+    process.exit(1);
+  }
+
+  // Check for unrecognized flags
+  for (const tok of argv.slice(2)) {
+    if (tok.startsWith('--') || (tok.startsWith('-') && tok.length > 2 && !/^\d+$/.test(tok))) {
+      // Skip known flags and their values
+      const knownFlags = ['-h', '--help', '-v', '--version', '--no-content', '--limit', '--max-content'];
+      if (!knownFlags.includes(tok)) {
+        throw new UserError(`Unrecognized option: ${tok}. Use --help for usage information.`);
+      }
+    }
   }
 
   args.command = 'search';

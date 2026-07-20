@@ -23,11 +23,21 @@ function serialize(extra: unknown): string {
   }
 }
 
+function formatLine(level: LogLevel, component: string, message: string, extra?: unknown): string {
+  const suffix = serialize(extra);
+  switch (level) {
+    case 'warn':
+      return suffix ? `[${component}] WARN: ${message} — ${suffix.slice(0, 120)}` : `[${component}] WARN: ${message}`;
+    case 'error':
+      return suffix ? `[${component}] ERROR: ${message} — ${suffix.slice(0, 120)}` : `[${component}] ERROR: ${message}`;
+    default:
+      return suffix ? `[${component}] ${message} ${suffix}` : `[${component}] ${message}`;
+  }
+}
+
 function write(level: LogLevel, component: string, message: string, extra?: unknown): void {
   if (PRIORITY[level] < minPriority()) return;
-  const suffix = serialize(extra);
-  const line = suffix ? `[${component}] ${message} ${suffix}` : `[${component}] ${message}`;
-  process.stderr.write(line + '\n');
+  process.stderr.write(formatLine(level, component, message, extra) + '\n');
 }
 
 export function createLogger(component: string) {
@@ -36,6 +46,14 @@ export function createLogger(component: string) {
     info: (message: string, extra?: unknown) => write('info', component, message, extra),
     warn: (message: string, extra?: unknown) => write('warn', component, message, extra),
     error: (message: string, extra?: unknown) => write('error', component, message, extra),
+    failure: (message: string, extra?: unknown) => {
+      if (PRIORITY['warn'] < minPriority()) return;
+      process.stderr.write(`[${component}] FAILED: ${message}\n`);
+      if (extra !== undefined) {
+        const detail = extra instanceof Error ? extra.message : String(extra);
+        process.stderr.write(`  — ${detail.slice(0, 200)}\n`);
+      }
+    },
   };
 }
 

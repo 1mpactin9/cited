@@ -43,7 +43,7 @@ export class SearchEngine {
           const approach = approaches[i];
           try {
             log.debug(`attempting ${approach.name} (${i + 1}/${approaches.length})`);
-            const approachTimeout = Math.min(timeout / 3, 4000);
+            const approachTimeout = Math.max(Math.floor(timeout / 3), 4000);
             const results = await approach.method(sanitizedQuery, numResults, approachTimeout);
             if (results.length === 0) continue;
 
@@ -70,12 +70,17 @@ export class SearchEngine {
               return { results: bestResults, engine: bestEngine };
             }
           } catch (error) {
-            log.debug(`${approach.name} approach failed`, error instanceof Error ? error.message : error);
+            log.failure(`${approach.name} approach failed`, error instanceof Error ? error.message : error);
           }
         }
 
-        log.warn('all approaches failed, returning empty results');
-        return { results: [], engine: 'None' };
+        if (bestResults.length === 0) {
+          log.warn('all approaches failed, returning empty results');
+          return { results: [], engine: 'None' };
+        } else {
+          log.info(`using best results from ${bestEngine} (quality: ${bestQuality.toFixed(2)})`);
+          return { results: bestResults, engine: bestEngine };
+        }
       });
     } catch (error) {
       log.error('search error', error);
@@ -87,13 +92,19 @@ export class SearchEngine {
     for (let attempt = 1; attempt <= 2; attempt++) {
       let browser;
       try {
-        const { firefox } = await import('playwright');
-        browser = await firefox.launch({
+        const { chromium } = await import('playwright');
+        browser = await chromium.launch({
           headless: true,
-          args: ['--no-sandbox', '--disable-dev-shm-usage'],
+          args: [
+            '--headless=new',
+            '--no-sandbox',
+            '--disable-blink-features=AutomationControlled',
+            '--disable-dev-shm-usage',
+            '--disable-gpu',
+          ],
         });
         log.debug(`brave attempt ${attempt}/2`);
-        return await this.tryBrowserBraveSearchInternal(browser, query, numResults, timeout);
+        return await this.tryBrowserBraveSearchInternal(browser, query, numResults, Math.min(timeout / 2, 6000));
       } catch (error) {
         log.debug(`brave attempt ${attempt}/2 failed`, error instanceof Error ? error.message : error);
         if (attempt === 2) throw error;
@@ -284,6 +295,12 @@ export class SearchEngine {
         if (results.length >= maxResults) return false;
         const $element = $(element);
 
+        // Skip sponsored/ad results
+        const dt = $element.attr('data-type') || '';
+        if (dt === 'sponsored' || dt === 'ad') return;
+        if ($element.attr('class')?.toLowerCase().includes('sponsored') ||
+            $element.attr('class')?.toLowerCase().includes('ad-')) return;
+
         const titleSelectors = ['.title a', 'h2 a', '.result-title a', 'a[href*="://"]', '.snippet-title a'];
         let title = '';
         let url = '';
@@ -291,10 +308,15 @@ export class SearchEngine {
           const $titleElement = $element.find(titleSelector).first();
           if ($titleElement.length) {
             title = $titleElement.text().trim();
+            // Remove breadcrumb-like suffixes (e.g., "TypeScript typescriptlang.org")
+            title = title.replace(/\s+(typescriptlang\.org|w3schools\.com|geeksforgeeks\.org|medium\.com|reddit\.com|stackoverflow\.com|github\.com).*$/i, '').trim();
             url = $titleElement.attr('href') || '';
             if (title && url && url.startsWith('http')) break;
           }
         }
+
+        // Skip titles that indicate ads
+        if (title.match(/^(Sponsored|Ad|Promoted)/i)) return;
 
         if (!title) {
           const textContent = $element.text().trim();
@@ -336,13 +358,13 @@ export class SearchEngine {
 
     const pageTitle = $('title').text();
     if (pageTitle.includes('Access Denied') || pageTitle.includes('blocked') || pageTitle.includes('captcha')) {
-      log.debug('bing bot detection or access denied in page title');
+      log.warn('Bing returned bot detection or access denied page');
     }
 
-    const resultSelectors = ['.b_algo', '.b_result', '.b_card'];
+    const resultSelectors = ['.b_algo', '.b_result'];
     for (const selector of resultSelectors) {
       if (results.length >= maxResults) break;
-      const elements = $(selector);
+      const elements = $(selector).not('.b_ad');
       if (elements.length === 0) continue;
       elements.each((_index, element) => {
         if (results.length >= maxResults) return false;
@@ -359,6 +381,10 @@ export class SearchEngine {
             break;
           }
         }
+
+        // Skip sponsored/ad results
+        if (title.match(/^(Sponsored|Ad|Promoted)/i)) return;
+        if (url.includes('bing.com/ck/') || url.includes('u.bing.net')) return;
 
         const snippetSelectors = [
           '.b_caption p', '.b_snippet', '.b_descript', '.b_caption', '.b_caption > span',
@@ -401,6 +427,11 @@ export class SearchEngine {
     $('.result').each((_index, element) => {
       if (results.length >= maxResults) return false;
       const $element = $(element);
+
+      // Skip sponsored/ad results
+      if ($element.find('.result-header--sentinel').length > 0 ||
+          $element.attr('class')?.toLowerCase().includes('ad')) return;
+
       const $titleElement = $element.find('.result__title a');
       const title = $titleElement.text().trim();
       const url = $titleElement.attr('href');

@@ -32,9 +32,9 @@ export class EnhancedContentExtractor {
       log.debug(`axios extracted ${content.length} chars: ${url}`);
       return content;
     } catch (error) {
-      log.debug(`axios failed: ${url}`, error instanceof Error ? error.message : 'unknown');
+      log.failure(`axios extraction failed for ${url}`, error instanceof Error ? error.message : 'unknown');
       if (this.shouldUseBrowser(error, url)) {
-        log.debug(`falling back to headless browser: ${url}`);
+        log.info(`falling back to headless browser: ${url}`);
         try {
           const content = await this.extractWithBrowser(options);
           log.debug(`browser extracted ${content.length} chars: ${url}`);
@@ -142,6 +142,14 @@ export class EnhancedContentExtractor {
       }
 
       const html = await page.content();
+
+      // Check for bot detection pages before extracting
+      if (html.includes('access denied') || html.includes('security check') ||
+          html.includes('verify you are human') || html.includes('blocked')) {
+        log.warn(`page blocked access (bot detection): ${url}`);
+        throw new Error('Page blocked access (bot detection)');
+      }
+
       const content = this.parseContent(html);
       await context.close();
       return content;
@@ -205,8 +213,8 @@ export class EnhancedContentExtractor {
   }
 
   private isLowQualityContent(content: string): boolean {
+    // Only flag as low quality when we see clear bot-detection signals, not just short content
     const lowQualityIndicators = [
-      content.length < 100,
       content.includes('Please enable JavaScript'),
       content.includes('Access Denied'),
       content.includes('403 Forbidden'),
@@ -328,6 +336,19 @@ export class EnhancedContentExtractor {
     const successfulResults = allResults.filter(r => r.fetchStatus === 'success');
     const failedResults = allResults.filter(r => r.fetchStatus === 'error');
 
+    // Log failure summary at info level
+    if (failedResults.length > 0) {
+      const reasonCounts = new Map<string, number>();
+      failedResults.forEach(r => {
+        const reason = r.error || 'Unknown';
+        reasonCounts.set(reason, (reasonCounts.get(reason) || 0) + 1);
+      });
+      const summary = Array.from(reasonCounts.entries())
+        .map(([reason, count]) => count > 1 ? `${reason} (${count})` : reason)
+        .join(', ');
+      log.info(`extraction failures: ${summary}`);
+    }
+
     const enhancedResults = [
       ...successfulResults.slice(0, targetCount),
       ...failedResults.slice(0, Math.max(0, targetCount - successfulResults.length)),
@@ -340,37 +361,47 @@ export class EnhancedContentExtractor {
   private parseContent(html: string): string {
     const $ = cheerio.load(html);
 
-    $('script, style, noscript, iframe, img, video, audio, canvas, svg, object, embed, applet, form, input, textarea, select, button, label, fieldset, legend, optgroup, option').remove();
-    $('nav, header, footer, .nav, .header, .footer, .sidebar, .menu, .breadcrumb, aside, .ad, .advertisement, .ads, .advertisement-container, .social-share, .share-buttons, .comments, .comment-section, .related-posts, .recommendations, .newsletter-signup, .cookie-notice, .privacy-notice, .terms-notice, .disclaimer, .legal, .copyright, .meta, .metadata, .author-info, .publish-date, .tags, .categories, .navigation, .pagination, .search-box, .search-form, .login-form, .signup-form, .newsletter, .popup, .modal, .overlay, .tooltip, .toolbar, .ribbon, .banner, .promo, .sponsored, .affiliate, .tracking, .analytics, .pixel, .beacon').remove();
-    $('[class*="ad"], [class*="ads"], [class*="advertisement"], [class*="tracking"], [class*="analytics"], [class*="pixel"], [class*="beacon"], [class*="sponsored"], [class*="affiliate"], [class*="promo"], [class*="banner"], [class*="popup"], [class*="modal"], [class*="overlay"], [class*="tooltip"], [class*="toolbar"], [class*="ribbon"]').remove();
-    $('[id*="ad"], [id*="ads"], [id*="advertisement"], [id*="tracking"], [id*="analytics"], [id*="pixel"], [id*="beacon"], [id*="sponsored"], [id*="affiliate"], [id*="promo"], [id*="banner"], [id*="popup"], [id*="modal"], [id*="overlay"], [id*="tooltip"], [id*="toolbar"], [id*="ribbon"], [id*="sidebar"], [id*="navigation"], [id*="menu"], [id*="footer"], [id*="header"]').remove();
-    $('picture, source, figure, figcaption, .image, .img, .photo, .picture, .media, .gallery, .slideshow, .carousel').remove();
-    $('[data-src*="image"], [data-src*="img"], [data-src*="photo"], [data-src*="picture"]').remove();
-    $('[style*="background-image"]').remove();
-
-    $('*').each(function () {
-      const $this = $(this);
-      if ($this.children().length === 0 && $this.text().trim() === '') {
-        $this.remove();
-      }
-    });
-
+    // Extract main content BEFORE removing structural elements
     let mainContent = '';
     const contentSelectors = [
-      'article', 'main', '[role="main"]', '.content', '.post-content', '.entry-content',
-      '.article-content', '.story-content', '.news-content', '.main-content', '.page-content',
-      '.text-content', '.body-content', '.copy', '.text', '.body',
+      'article',
+      'main',
+      '[role="main"]',
+      '.mw-parser-output',
+      '.post-content',
+      '.entry-content',
+      '.rf-content',
+      '.section-content',
+      '.article-content',
+      '.story-content',
+      '.news-content',
+      '.main-content',
+      '.page-content',
+      '.text-content',
+      '.body-content',
+      '.content',
+      '.copy',
+      '.text',
+      '.body',
     ];
 
     for (const selector of contentSelectors) {
       const $content = $(selector).first();
       if ($content.length > 0) {
         mainContent = $content.text().trim();
-        if (mainContent.length > 100) break;
+        if (mainContent.length >= 50) break;
       }
     }
 
-    if (!mainContent || mainContent.length < 100) {
+    // Remove decorative elements from full page
+    $('script, style, noscript, iframe, img, video, audio, canvas, svg, object, embed, applet, form, input, textarea, select, button, label, fieldset, legend, optgroup, option').remove();
+    $('nav, header, footer, .nav, .header, .footer, .sidebar, .menu, .breadcrumb, aside, .ad, .advertisement, .ads, .advertisement-container, .social-share, .share-buttons, .comments, .comment-section, .related-posts, .recommendations, .newsletter-signup, .cookie-notice, .privacy-notice, .terms-notice, .disclaimer, .legal, .copyright, .meta, .metadata, .author-info, .publish-date, .tags, .categories, .navigation, .pagination, .search-box, .search-form, .login-form, .signup-form, .newsletter, .popup, .modal, .overlay, .tooltip, .toolbar, .ribbon, .banner, .promo, .sponsored, .affiliate, .tracking, .analytics, .pixel, .beacon').remove();
+    $('[class^="ad-"], [class*=" ad-"], [id^="ad-"], [id*="-ad"]').remove();
+    $('[data-src*="image"], [data-src*="img"], [data-src*="photo"], [data-src*="picture"]').remove();
+    $('[style*="background-image"]').remove();
+
+    // Fallback to body text if no main content found
+    if (!mainContent || mainContent.length < 50) {
       mainContent = $('body').text().trim();
     }
 
@@ -383,9 +414,6 @@ export class EnhancedContentExtractor {
     text = text.replace(/data:image\/[^;]+;base64,[A-Za-z0-9+/=]+/g, '');
     text = text.replace(/https?:\/\/[^\s]+\.(jpg|jpeg|png|gif|webp|svg|ico|bmp|tiff)(\?[^\s]*)?/gi, '');
     text = text.replace(/\.(jpg|jpeg|png|gif|webp|svg|ico|bmp|tiff)/gi, '');
-    text = text.replace(/image|img|photo|picture|gallery|slideshow|carousel/gi, '');
-    text = text.replace(/click to enlarge|click for full size|view larger|download image/gi, '');
-    text = text.replace(/cookie|privacy|terms|conditions|disclaimer|legal|copyright|all rights reserved/gi, '');
     text = text.replace(/\n\s*\n/g, '\n');
     text = text.replace(/\r\n/g, '\n');
     text = text.replace(/\r/g, '\n');
